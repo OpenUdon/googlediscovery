@@ -1,0 +1,173 @@
+{
+  "kind": "discovery#restDescription",
+  "discoveryVersion": "v1",
+  "id": "drive:v3",
+  "name": "drive",
+  "version": "v3",
+  "title": "Google Drive API",
+  "description": "Google Drive API",
+  "rootUrl": "https://www.googleapis.com/",
+  "servicePath": "drive/v3/",
+  "baseUrl": "https://www.googleapis.com/drive/v3/",
+  "resources": {
+    "files": {
+      "methods": {
+        "list": {
+          "id": "drive.files.list",
+          "path": "files",
+          "httpMethod": "GET",
+          "description": "List or search files.",
+          "parameters": {
+            "q": {
+              "type": "string",
+              "location": "query",
+              "description": "Search query"
+            },
+            "driveId": {
+              "type": "string",
+              "location": "query",
+              "description": "ID of the shared drive"
+            },
+            "corpora": {
+              "type": "string",
+              "location": "query",
+              "description": "Corpora to query"
+            },
+            "pageSize": {
+              "type": "integer",
+              "location": "query",
+              "description": "Page size"
+            },
+            "pageToken": {
+              "type": "string",
+              "location": "query",
+              "description": "Page token"
+            }
+          },
+          "response": {
+            "$ref": "FileList"
+          }
+        },
+        "get": {
+          "id": "drive.files.get",
+          "path": "files/{fileId}",
+          "httpMethod": "GET",
+          "description": "Get a file.",
+          "parameters": {
+            "fileId": {
+              "type": "string",
+              "location": "path",
+              "required": true,
+              "description": "File identifier"
+            },
+            "acknowledgeAbuse": {
+              "type": "boolean",
+              "location": "query",
+              "description": "Whether the user acknowledges abuse"
+            }
+          },
+          "response": {
+            "$ref": "File"
+          }
+        },
+        "create": {
+          "id": "drive.files.create",
+          "path": "files",
+          "httpMethod": "POST",
+          "description": "Create a file.",
+          "parameters": {
+            "supportsAllDrives": {
+              "type": "boolean",
+              "location": "query",
+              "description": "Whether both My Drives and shared drives are supported"
+            }
+          },
+          "request": {
+            "$ref": "File"
+          },
+          "response": {
+            "$ref": "File"
+          },
+          "supportsMediaUpload": true,
+          "mediaUpload": {
+            "protocols": {
+              "simple": {
+                "multipart": true,
+                "path": "/upload/drive/v3/files"
+              }
+            }
+          }
+        },
+        "delete": {
+          "id": "drive.files.delete",
+          "path": "files/{fileId}",
+          "httpMethod": "DELETE",
+          "description": "Delete a file.",
+          "parameters": {
+            "fileId": {
+              "type": "string",
+              "location": "path",
+              "required": true
+            }
+          }
+        }
+      }
+    }
+  },
+  "schemas": {
+    "User": {
+      "type": "object",
+      "description": "A user.",
+      "properties": {
+        "displayName": {
+          "type": "string"
+        },
+        "emailAddress": {
+          "type": "string"
+        }
+      }
+    },
+    "File": {
+      "type": "object",
+      "description": "The metadata for a file.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "mimeType": {
+          "type": "string"
+        },
+        "parents": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "owners": {
+          "type": "array",
+          "items": {
+            "$ref": "User"
+          }
+        }
+      }
+    },
+    "FileList": {
+      "type": "object",
+      "description": "A list of files.",
+      "properties": {
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "File"
+          }
+        },
+        "nextPageToken": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
