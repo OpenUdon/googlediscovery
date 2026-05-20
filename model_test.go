@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -146,4 +147,241 @@ func TestParsePreservesAllMediaUploadProtocols(t *testing.T) {
 	if got, want := op.MediaUploads["resumable"].Path, "/resumable/things"; got != want {
 		t.Fatalf("resumable path = %q, want %q", got, want)
 	}
+}
+
+func TestParsePreservesRefSiblingsAndDiscoveryEnumMetadata(t *testing.T) {
+	model, err := ParseMap(map[string]any{
+		"schemas": map[string]any{
+			"Owner": map[string]any{"type": "object"},
+			"Thing": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"owner": map[string]any{
+						"$ref":        "Owner",
+						"description": "Resource owner.",
+						"deprecated":  true,
+					},
+					"state": map[string]any{
+						"type":             "string",
+						"enum":             []any{"ACTIVE"},
+						"enumDescriptions": []any{"Active resource."},
+					},
+				},
+			},
+		},
+		"methods": map[string]any{
+			"list": map[string]any{
+				"id":         "things.list",
+				"httpMethod": "GET",
+				"path":       "things",
+				"parameters": map[string]any{
+					"state": map[string]any{
+						"type":             "string",
+						"location":         "query",
+						"enum":             []any{"ACTIVE"},
+						"enumDescriptions": []any{"Active resource."},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ParseMap failed: %v", err)
+	}
+	thing, ok := model.Schema("Thing")
+	if !ok {
+		t.Fatal("missing Thing schema")
+	}
+	props := thing["properties"].(map[string]any)
+	owner := props["owner"].(map[string]any)
+	if got, want := owner["$ref"], "#/components/schemas/Owner"; got != want {
+		t.Fatalf("owner ref = %#v, want %#v", got, want)
+	}
+	if got, want := owner["description"], "Resource owner."; got != want {
+		t.Fatalf("owner description = %#v, want %#v", got, want)
+	}
+	if got, want := owner["deprecated"], true; got != want {
+		t.Fatalf("owner deprecated = %#v, want %#v", got, want)
+	}
+	state := props["state"].(map[string]any)
+	if got, want := state["enumDescriptions"], []any{"Active resource."}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("schema enumDescriptions = %#v, want %#v", got, want)
+	}
+	op, ok := model.OperationByName("things_list")
+	if !ok {
+		t.Fatal("missing things_list")
+	}
+	if got, want := op.Parameters[0].Schema["enumDescriptions"], []any{"Active resource."}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("parameter enumDescriptions = %#v, want %#v", got, want)
+	}
+}
+
+func TestParsePreservesDiscoveryDefaultsAndNormalizesConstraints(t *testing.T) {
+	model, err := ParseMap(map[string]any{
+		"schemas": map[string]any{
+			"Thing": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"count": map[string]any{
+						"type":    "integer",
+						"default": "0",
+						"minimum": "1",
+					},
+					"enabled": map[string]any{
+						"type":    "boolean",
+						"default": "false",
+					},
+				},
+			},
+		},
+		"methods": map[string]any{
+			"list": map[string]any{
+				"id":         "things.list",
+				"httpMethod": "GET",
+				"path":       "things",
+				"parameters": map[string]any{
+					"maxResults": map[string]any{
+						"type":     "integer",
+						"location": "query",
+						"default":  "100",
+						"minimum":  "1",
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ParseMap failed: %v", err)
+	}
+	thing, ok := model.Schema("Thing")
+	if !ok {
+		t.Fatal("missing Thing schema")
+	}
+	props := thing["properties"].(map[string]any)
+	count := props["count"].(map[string]any)
+	if got, want := count["default"], "0"; got != want {
+		t.Fatalf("schema default = %#v, want %#v", got, want)
+	}
+	if got, want := count["minimum"], float64(1); got != want {
+		t.Fatalf("schema minimum = %#v, want %#v", got, want)
+	}
+	enabled := props["enabled"].(map[string]any)
+	if got, want := enabled["default"], "false"; got != want {
+		t.Fatalf("boolean default = %#v, want %#v", got, want)
+	}
+	op, ok := model.OperationByName("things_list")
+	if !ok {
+		t.Fatal("missing things_list")
+	}
+	if got, want := op.Parameters[0].Schema["default"], "100"; got != want {
+		t.Fatalf("parameter default = %#v, want %#v", got, want)
+	}
+	if got, want := op.Parameters[0].Schema["minimum"], float64(1); got != want {
+		t.Fatalf("parameter minimum = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseRejectsMalformedKnownNestedFields(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  map[string]any
+		want string
+	}{
+		{
+			name: "schema_items",
+			raw: map[string]any{
+				"schemas": map[string]any{
+					"Thing": map[string]any{"type": "array", "items": "bad"},
+				},
+			},
+			want: "schemas.Thing.items must be an object",
+		},
+		{
+			name: "schema_composition",
+			raw: map[string]any{
+				"schemas": map[string]any{
+					"Thing": map[string]any{"allOf": map[string]any{}},
+				},
+			},
+			want: "schemas.Thing.allOf must be an array",
+		},
+		{
+			name: "oauth_scope",
+			raw: map[string]any{
+				"auth": map[string]any{
+					"oauth2": map[string]any{
+						"scopes": map[string]any{
+							"https://www.googleapis.com/auth/example": "bad",
+						},
+					},
+				},
+			},
+			want: "must be an object",
+		},
+		{
+			name: "media_upload_protocol",
+			raw: map[string]any{
+				"methods": map[string]any{
+					"upload": map[string]any{
+						"id":         "things.upload",
+						"httpMethod": "POST",
+						"path":       "things",
+						"mediaUpload": map[string]any{
+							"protocols": map[string]any{
+								"simple": "bad",
+							},
+						},
+					},
+				},
+			},
+			want: "mediaUpload.protocols.simple must be an object",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseMap(tt.raw)
+			if err == nil {
+				t.Fatal("ParseMap succeeded, want error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want substring %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
+func TestParseRejectsExcessiveNesting(t *testing.T) {
+	t.Run("resources", func(t *testing.T) {
+		resources := map[string]any{}
+		current := resources
+		for i := 0; i <= maxDiscoveryNestingDepth+1; i++ {
+			next := map[string]any{}
+			current["r"] = map[string]any{"resources": next}
+			current = next
+		}
+		_, err := ParseMap(map[string]any{"resources": resources})
+		if err == nil {
+			t.Fatal("ParseMap succeeded, want depth error")
+		}
+		if !strings.Contains(err.Error(), "resource nesting exceeds") {
+			t.Fatalf("error = %q, want resource nesting error", err.Error())
+		}
+	})
+
+	t.Run("schemas", func(t *testing.T) {
+		schema := map[string]any{"type": "array"}
+		current := schema
+		for i := 0; i <= maxDiscoveryNestingDepth+1; i++ {
+			next := map[string]any{"type": "array"}
+			current["items"] = next
+			current = next
+		}
+		_, err := ParseMap(map[string]any{"schemas": map[string]any{"Thing": schema}})
+		if err == nil {
+			t.Fatal("ParseMap succeeded, want depth error")
+		}
+		if !strings.Contains(err.Error(), "exceeds schema nesting limit") {
+			t.Fatalf("error = %q, want schema nesting error", err.Error())
+		}
+	})
 }

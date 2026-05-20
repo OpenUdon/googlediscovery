@@ -9,6 +9,15 @@ import (
 	"strings"
 )
 
+var numericSchemaConstraintKeys = map[string]bool{
+	"minimum":   true,
+	"maximum":   true,
+	"minLength": true,
+	"maxLength": true,
+	"minItems":  true,
+	"maxItems":  true,
+}
+
 func discoveryServerAndPathPrefix(raw map[string]any) (serverURL, pathPrefix string) {
 	rootURL := trimTrailingSlash(stringValue(raw["rootUrl"]))
 	servicePath := trimSlashes(stringValue(raw["servicePath"]))
@@ -26,64 +35,92 @@ func discoveryServerAndPathPrefix(raw map[string]any) (serverURL, pathPrefix str
 	return "https://www.googleapis.com", ""
 }
 
-func discoveryOAuthScopes(raw map[string]any) map[string]any {
-	auth, ok := mapValue(raw["auth"])
-	if !ok {
-		return nil
+func discoveryOAuthScopes(raw map[string]any) (map[string]any, error) {
+	auth, ok, err := optionalMapField(raw, "auth", "discovery document")
+	if err != nil {
+		return nil, err
 	}
-	oauth2, ok := mapValue(auth["oauth2"])
 	if !ok {
-		return nil
+		return nil, nil
 	}
-	scopes, ok := mapValue(oauth2["scopes"])
+	oauth2, ok, err := optionalMapField(auth, "oauth2", "discovery document.auth")
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	scopes, ok, err := optionalMapField(oauth2, "scopes", "discovery document.auth.oauth2")
+	if err != nil {
+		return nil, err
+	}
 	if !ok || len(scopes) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make(map[string]any, len(scopes))
 	for _, name := range sortedKeys(scopes) {
 		description := ""
-		if scope, ok := mapValue(scopes[name]); ok {
+		scope, ok, err := mapValueRequired(scopes[name], "discovery document.auth.oauth2.scopes."+name)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			description = stringValue(scope["description"])
 		}
 		out[name] = description
 	}
-	return out
+	return out, nil
 }
 
-func methodPath(pathPrefix string, method map[string]any) string {
-	if upload := preferredMediaUpload(discoveryMediaUploads(method)); upload != nil && upload.Path != "" {
-		return upload.Path
+func methodPath(pathPrefix string, method map[string]any) (string, error) {
+	uploads, err := discoveryMediaUploads(method)
+	if err != nil {
+		return "", err
+	}
+	if upload := preferredMediaUpload(uploads); upload != nil && upload.Path != "" {
+		return upload.Path, nil
 	}
 	p := strings.TrimSpace(stringValue(method["path"]))
 	if p == "" {
-		return ""
+		return "", nil
 	}
 	if strings.HasPrefix(p, "http://") || strings.HasPrefix(p, "https://") {
-		return p
+		return p, nil
 	}
 	p = "/" + strings.TrimPrefix(p, "/")
 	if pathPrefix == "" {
-		return p
+		return p, nil
 	}
-	return "/" + strings.Trim(pathPrefix, "/") + p
+	return "/" + strings.Trim(pathPrefix, "/") + p, nil
 }
 
 func convertSchemaMap(schema map[string]any, path string) (map[string]any, error) {
+	return convertSchemaMapDepth(schema, path, 0)
+}
+
+func convertSchemaMapDepth(schema map[string]any, path string, depth int) (map[string]any, error) {
 	if schema == nil {
 		return nil, nil
 	}
-	if ref := stringValue(schema["$ref"]); ref != "" {
-		return map[string]any{"$ref": "#/components/schemas/" + ref}, nil
+	if depth > maxDiscoveryNestingDepth {
+		return nil, fmt.Errorf("%s exceeds schema nesting limit of %d", path, maxDiscoveryNestingDepth)
 	}
 	out := map[string]any{}
+	if ref := stringValue(schema["$ref"]); ref != "" {
+		out["$ref"] = "#/components/schemas/" + ref
+	}
 	for _, key := range []string{
 		"type", "format", "description", "title", "default", "example",
-		"pattern", "nullable", "deprecated", "readOnly", "writeOnly",
+		"pattern", "nullable", "deprecated", "readOnly", "writeOnly", "enumDescriptions",
 		"minimum", "maximum", "minLength", "maxLength", "minItems",
 		"maxItems", "uniqueItems",
 	} {
 		if v, ok := schema[key]; ok {
-			if normalized, ok := normalizeNumericJSON(v); ok {
+			if numericSchemaConstraintKeys[key] {
+				normalized, ok := normalizeNumericJSON(v)
+				if !ok {
+					return nil, fmt.Errorf("%s.%s must be numeric", path, key)
+				}
 				out[key] = normalized
 				continue
 			}
@@ -109,7 +146,7 @@ func convertSchemaMap(schema map[string]any, path string) (map[string]any, error
 					return nil, err
 				}
 				if ok {
-					converted, err := convertSchemaMap(prop, path+".properties."+name)
+					converted, err := convertSchemaMapDepth(prop, path+".properties."+name, depth+1)
 					if err != nil {
 						return nil, err
 					}
@@ -122,8 +159,12 @@ func convertSchemaMap(schema map[string]any, path string) (map[string]any, error
 		}
 	}
 	if v, ok := schema["items"]; ok {
-		if items, ok := mapValue(v); ok {
-			converted, err := convertSchemaMap(items, path+".items")
+		items, ok, err := mapValueRequired(v, path+".items")
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			converted, err := convertSchemaMapDepth(items, path+".items", depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -131,54 +172,30 @@ func convertSchemaMap(schema map[string]any, path string) (map[string]any, error
 		}
 	}
 	if v, ok := schema["allOf"]; ok {
-		if arr, ok := sliceValue(v); ok {
-			outArr := make([]any, 0, len(arr))
-			for _, item := range arr {
-				if m, ok := mapValue(item); ok {
-					converted, err := convertSchemaMap(m, path+".allOf")
-					if err != nil {
-						return nil, err
-					}
-					outArr = append(outArr, converted)
-				}
-			}
-			if len(outArr) > 0 {
-				out["allOf"] = outArr
-			}
+		outArr, err := convertSchemaList(v, path+".allOf", depth+1)
+		if err != nil {
+			return nil, err
+		}
+		if len(outArr) > 0 {
+			out["allOf"] = outArr
 		}
 	}
 	if v, ok := schema["oneOf"]; ok {
-		if arr, ok := sliceValue(v); ok {
-			outArr := make([]any, 0, len(arr))
-			for _, item := range arr {
-				if m, ok := mapValue(item); ok {
-					converted, err := convertSchemaMap(m, path+".oneOf")
-					if err != nil {
-						return nil, err
-					}
-					outArr = append(outArr, converted)
-				}
-			}
-			if len(outArr) > 0 {
-				out["oneOf"] = outArr
-			}
+		outArr, err := convertSchemaList(v, path+".oneOf", depth+1)
+		if err != nil {
+			return nil, err
+		}
+		if len(outArr) > 0 {
+			out["oneOf"] = outArr
 		}
 	}
 	if v, ok := schema["anyOf"]; ok {
-		if arr, ok := sliceValue(v); ok {
-			outArr := make([]any, 0, len(arr))
-			for _, item := range arr {
-				if m, ok := mapValue(item); ok {
-					converted, err := convertSchemaMap(m, path+".anyOf")
-					if err != nil {
-						return nil, err
-					}
-					outArr = append(outArr, converted)
-				}
-			}
-			if len(outArr) > 0 {
-				out["anyOf"] = outArr
-			}
+		outArr, err := convertSchemaList(v, path+".anyOf", depth+1)
+		if err != nil {
+			return nil, err
+		}
+		if len(outArr) > 0 {
+			out["anyOf"] = outArr
 		}
 	}
 	if v, ok := schema["additionalProperties"]; ok {
@@ -186,12 +203,37 @@ func convertSchemaMap(schema map[string]any, path string) (map[string]any, error
 		case bool:
 			out["additionalProperties"] = t
 		case map[string]any:
-			converted, err := convertSchemaMap(t, path+".additionalProperties")
+			converted, err := convertSchemaMapDepth(t, path+".additionalProperties", depth+1)
 			if err != nil {
 				return nil, err
 			}
 			out["additionalProperties"] = converted
+		default:
+			return nil, fmt.Errorf("%s.additionalProperties must be a boolean or object", path)
 		}
+	}
+	return out, nil
+}
+
+func convertSchemaList(value any, path string, depth int) ([]any, error) {
+	arr, ok := sliceValue(value)
+	if !ok {
+		return nil, fmt.Errorf("%s must be an array", path)
+	}
+	out := make([]any, 0, len(arr))
+	for i, item := range arr {
+		m, ok, err := mapValueRequired(item, fmt.Sprintf("%s[%d]", path, i))
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		converted, err := convertSchemaMapDepth(m, fmt.Sprintf("%s[%d]", path, i), depth)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, converted)
 	}
 	return out, nil
 }
@@ -218,7 +260,7 @@ func convertDiscoveryParamSchema(param map[string]any) (map[string]any, error) {
 			schema["type"] = t
 		}
 	}
-	for _, key := range []string{"format", "description", "default", "pattern", "minimum", "maximum", "minLength", "maxLength"} {
+	for _, key := range []string{"format", "description", "default", "pattern", "enumDescriptions"} {
 		if v, ok := param[key]; ok {
 			schema[key] = v
 		}
@@ -227,7 +269,11 @@ func convertDiscoveryParamSchema(param map[string]any) (map[string]any, error) {
 		schema["enum"] = v
 	}
 	if v, ok := param["items"]; ok {
-		if itemMap, ok := mapValue(v); ok {
+		itemMap, ok, err := mapValueRequired(v, "parameter.items")
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			converted, err := convertSchemaMap(itemMap, "parameter.items")
 			if err != nil {
 				return nil, err

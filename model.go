@@ -6,6 +6,8 @@ import (
 	"strings"
 )
 
+const maxDiscoveryNestingDepth = 256
+
 // Model is a parsed Google Discovery document. It preserves Discovery
 // metadata directly instead of treating the service as OpenAPI.
 type Model struct {
@@ -110,6 +112,10 @@ func (p *discoveryParser) parse() (*Model, error) {
 		return nil, fmt.Errorf("discovery document root must be an object")
 	}
 	serverURL, pathPrefix := discoveryServerAndPathPrefix(p.raw)
+	scopes, err := discoveryOAuthScopeStrings(p.raw)
+	if err != nil {
+		return nil, err
+	}
 	model := &Model{
 		DiscoveryVersion: stringValue(p.raw["discoveryVersion"]),
 		Name:             stringValue(p.raw["name"]),
@@ -118,7 +124,7 @@ func (p *discoveryParser) parse() (*Model, error) {
 		Description:      stringValue(p.raw["description"]),
 		ServerURL:        serverURL,
 		PathPrefix:       pathPrefix,
-		OAuth2Scopes:     discoveryOAuthScopeStrings(p.raw),
+		OAuth2Scopes:     scopes,
 	}
 	if model.Title == "" {
 		model.Title = "Google Discovery API"
@@ -184,14 +190,17 @@ func (p *discoveryParser) parseOperations() error {
 	if resources, ok, err := optionalMapField(p.raw, "resources", "discovery document"); err != nil {
 		return err
 	} else if ok {
-		if err := p.addResources(resources, rootParams, nil); err != nil {
+		if err := p.addResources(resources, rootParams, nil, 0); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (p *discoveryParser) addResources(resources map[string]any, inherited []map[string]any, tags []string) error {
+func (p *discoveryParser) addResources(resources map[string]any, inherited []map[string]any, tags []string, depth int) error {
+	if depth > maxDiscoveryNestingDepth {
+		return fmt.Errorf("discovery resource nesting exceeds %d levels", maxDiscoveryNestingDepth)
+	}
 	for _, name := range sortedKeys(resources) {
 		resource, ok, err := mapValueRequired(resources[name], "resources."+name)
 		if err != nil {
@@ -224,7 +233,7 @@ func (p *discoveryParser) addResources(resources map[string]any, inherited []map
 		if subresources, ok, err := optionalMapField(resource, "resources", "resource "+name); err != nil {
 			return err
 		} else if ok {
-			if err := p.addResources(subresources, params, nextTags); err != nil {
+			if err := p.addResources(subresources, params, nextTags, depth+1); err != nil {
 				return err
 			}
 		}
@@ -259,7 +268,10 @@ func (p *discoveryParser) parseMethod(name string, method map[string]any, inheri
 	if opID == "" {
 		opID = sanitizeIdentifier(name)
 	}
-	path := methodPath(p.model.PathPrefix, method)
+	path, err := methodPath(p.model.PathPrefix, method)
+	if err != nil {
+		return nil, err
+	}
 	if path == "" {
 		return nil, fmt.Errorf("discovery method %q missing path", id)
 	}
@@ -281,7 +293,10 @@ func (p *discoveryParser) parseMethod(name string, method map[string]any, inheri
 	if err != nil {
 		return nil, err
 	}
-	uploads := discoveryMediaUploads(method)
+	uploads, err := discoveryMediaUploads(method)
+	if err != nil {
+		return nil, err
+	}
 	upload := preferredMediaUpload(uploads)
 	requestRef := discoveryRequestRef(method)
 	op := &Operation{
@@ -351,27 +366,36 @@ func discoveryParameters(params []map[string]any) ([]*Parameter, error) {
 }
 
 func discoveryRequestRef(method map[string]any) string {
-	request := mapValueOrNil(method["request"])
+	request, _ := mapValue(method["request"])
 	return stringValue(request["$ref"])
 }
 
 func discoveryResponseRef(method map[string]any) string {
-	response := mapValueOrNil(method["response"])
+	response, _ := mapValue(method["response"])
 	return stringValue(response["$ref"])
 }
 
-func discoveryMediaUploads(method map[string]any) map[string]*MediaUpload {
-	mediaUpload, ok := mapValue(method["mediaUpload"])
-	if !ok {
-		return nil
+func discoveryMediaUploads(method map[string]any) (map[string]*MediaUpload, error) {
+	mediaUpload, ok, err := optionalMapField(method, "mediaUpload", "method "+stringValue(method["id"]))
+	if err != nil {
+		return nil, err
 	}
-	protocols, ok := mapValue(mediaUpload["protocols"])
 	if !ok {
-		return nil
+		return nil, nil
+	}
+	protocols, ok, err := optionalMapField(mediaUpload, "protocols", "method "+stringValue(method["id"])+".mediaUpload")
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
 	}
 	out := map[string]*MediaUpload{}
 	for _, protocol := range []string{"simple", "resumable"} {
-		item, ok := mapValue(protocols[protocol])
+		item, ok, err := mapValueRequired(protocols[protocol], "method "+stringValue(method["id"])+".mediaUpload.protocols."+protocol)
+		if err != nil {
+			return nil, err
+		}
 		if !ok {
 			continue
 		}
@@ -383,9 +407,9 @@ func discoveryMediaUploads(method map[string]any) map[string]*MediaUpload {
 		}
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, nil
 	}
-	return out
+	return out, nil
 }
 
 func preferredMediaUpload(uploads map[string]*MediaUpload) *MediaUpload {
@@ -414,16 +438,19 @@ func discoveryRequestMediaType(requestRef string, upload *MediaUpload) string {
 	return ""
 }
 
-func discoveryOAuthScopeStrings(raw map[string]any) map[string]string {
-	scopes := discoveryOAuthScopes(raw)
+func discoveryOAuthScopeStrings(raw map[string]any) (map[string]string, error) {
+	scopes, err := discoveryOAuthScopes(raw)
+	if err != nil {
+		return nil, err
+	}
 	if len(scopes) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make(map[string]string, len(scopes))
 	for _, name := range sortedKeys(scopes) {
 		out[name] = stringValue(scopes[name])
 	}
-	return out
+	return out, nil
 }
 
 func firstNonEmptyString(values ...string) string {
@@ -433,9 +460,4 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func mapValueOrNil(v any) map[string]any {
-	m, _ := mapValue(v)
-	return m
 }
