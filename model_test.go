@@ -33,6 +33,9 @@ func TestParseDriveDiscoveryModel(t *testing.T) {
 	if got, want := create.Path, "/upload/drive/v3/files"; got != want {
 		t.Fatalf("create path = %q, want %q", got, want)
 	}
+	if got, want := create.CanonicalPath, "/drive/v3/files"; got != want {
+		t.Fatalf("create canonical path = %q, want %q", got, want)
+	}
 	if got, want := create.RequestMediaType, "multipart/related"; got != want {
 		t.Fatalf("request media type = %q, want %q", got, want)
 	}
@@ -146,6 +149,12 @@ func TestParsePreservesAllMediaUploadProtocols(t *testing.T) {
 	}
 	if got, want := op.MediaUploads["resumable"].Path, "/resumable/things"; got != want {
 		t.Fatalf("resumable path = %q, want %q", got, want)
+	}
+	if got, want := op.Path, "/upload/things"; got != want {
+		t.Fatalf("path = %q, want upload path %q", got, want)
+	}
+	if got, want := op.CanonicalPath, "/things"; got != want {
+		t.Fatalf("canonical path = %q, want %q", got, want)
 	}
 }
 

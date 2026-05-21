@@ -72,6 +72,27 @@ func discoveryOAuthScopes(raw map[string]any) (map[string]any, error) {
 	return out, nil
 }
 
+// canonicalMethodPath returns the method's plain REST path with the path prefix
+// applied. It does not consider media upload protocols.
+func canonicalMethodPath(pathPrefix string, method map[string]any) string {
+	p := strings.TrimSpace(stringValue(method["path"]))
+	if p == "" {
+		return ""
+	}
+	if strings.HasPrefix(p, "http://") || strings.HasPrefix(p, "https://") {
+		return p
+	}
+	p = "/" + strings.TrimPrefix(p, "/")
+	if pathPrefix == "" {
+		return p
+	}
+	return "/" + strings.Trim(pathPrefix, "/") + p
+}
+
+// methodPath returns the preferred request path for a method. For methods with
+// media upload support it returns the preferred upload protocol path so that
+// request routing points to the correct upload endpoint. The plain REST path is
+// available via canonicalMethodPath.
 func methodPath(pathPrefix string, method map[string]any) (string, error) {
 	uploads, err := discoveryMediaUploads(method)
 	if err != nil {
@@ -80,18 +101,7 @@ func methodPath(pathPrefix string, method map[string]any) (string, error) {
 	if upload := preferredMediaUpload(uploads); upload != nil && upload.Path != "" {
 		return upload.Path, nil
 	}
-	p := strings.TrimSpace(stringValue(method["path"]))
-	if p == "" {
-		return "", nil
-	}
-	if strings.HasPrefix(p, "http://") || strings.HasPrefix(p, "https://") {
-		return p, nil
-	}
-	p = "/" + strings.TrimPrefix(p, "/")
-	if pathPrefix == "" {
-		return p, nil
-	}
-	return "/" + strings.Trim(pathPrefix, "/") + p, nil
+	return canonicalMethodPath(pathPrefix, method), nil
 }
 
 func convertSchemaMap(schema map[string]any, path string) (map[string]any, error) {

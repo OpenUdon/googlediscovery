@@ -30,7 +30,14 @@ type Operation struct {
 	Name              string
 	OperationID       string
 	HTTPMethod        string
-	Path              string
+	// Path is the preferred request path. For methods with media upload
+	// support it is the upload protocol path (e.g. /upload/drive/v3/files).
+	// Use CanonicalPath for the plain REST path.
+	Path string
+	// CanonicalPath is the method's plain REST path as declared in the
+	// Discovery document (e.g. /drive/v3/files). It is always set regardless
+	// of media upload support and is stable across upload protocol variants.
+	CanonicalPath     string
 	Summary           string
 	Description       string
 	Tags              []string
@@ -305,6 +312,7 @@ func (p *discoveryParser) parseMethod(name string, method map[string]any, inheri
 		OperationID:       opID,
 		HTTPMethod:        httpMethod,
 		Path:              path,
+		CanonicalPath:     canonicalMethodPath(p.model.PathPrefix, method),
 		Summary:           summarize(stringValue(method["description"]), name),
 		Description:       stringValue(method["description"]),
 		Tags:              append([]string(nil), tags...),
